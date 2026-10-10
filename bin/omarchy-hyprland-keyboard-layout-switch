@@ -1,0 +1,62 @@
+#!/bin/bash
+
+# omarchy:summary=Cycle to the next keyboard layout across all input devices
+# omarchy:args=[device]
+# omarchy:examples=omarchy hyprland keyboard-layout-switch | omarchy hyprland keyboard-layout-switch at-translated-set-2-keyboard
+
+device="${1:-}"
+
+fallback() {
+  if [[ -n $device ]]; then
+    hyprctl switchxkblayout "$device" next >/dev/null 2>&1
+  else
+    hyprctl switchxkblayout all next >/dev/null 2>&1
+  fi
+}
+
+# Query devices and synchronize all devices sharing the seat's layout list
+# to the next layout index in lockstep. This mirrors KeyboardLayout.qml,
+# preventing devices from drifting apart and bypassing virtual IME devices.
+if ! command -v jq >/dev/null 2>&1; then
+  fallback
+  exit 0
+fi
+
+json=$(hyprctl -j devices 2>/dev/null) || {
+  fallback
+  exit 0
+}
+
+commands=$(echo "$json" | jq -r --arg device "$device" '
+  (.keyboards // []) as $all
+  | ($all | map(select(.name | test("^(hl-virtual-keyboard|power-button|sleep-button|lid-switch|video-bus)") | not))) as $typed
+  | if $device != "" then
+      ($all | map(select(.name == $device))[0]) as $target
+      | if $target then
+          ($target.layout | split(",") | length) as $count
+          | if $count > 1 then
+              ((($target.active_layout_index // 0) + 1) % $count) as $next
+              | ($all | map(select(.layout == $target.layout) | .name))[]
+              | "\(. // empty) \($next)"
+            else empty end
+        else empty end
+    else
+      (($typed | map(select(.main))[0]) // $typed[0]) as $primary
+      | if $primary then
+          ($primary.layout | split(",") | length) as $count
+          | if $count > 1 then
+              ((($primary.active_layout_index // 0) + 1) % $count) as $next
+              | ($all | map(select(.layout == $primary.layout) | .name))[]
+              | "\(. // empty) \($next)"
+            else empty end
+        else empty end
+    end
+' 2>/dev/null)
+
+if [[ -n $commands ]]; then
+  while read -r name next_idx; do
+    if [[ -n $name && -n $next_idx ]]; then
+      hyprctl switchxkblayout "$name" "$next_idx" >/dev/null 2>&1
+    fi
+  done <<< "$commands"
+fi

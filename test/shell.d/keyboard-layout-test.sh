@@ -134,3 +134,78 @@ assertEqual(model.eventKeyboardName(rawEvent('hl-virtual-keyboard,English (US)')
 assertEqual(model.eventKeyboardName({ parse: () => { throw new Error('unsupported') }, data: 'kb,French' }), 'kb', 'a binding without parse falls back to the raw data')
 assertEqual(model.eventKeyboardName({}), '', 'an event with nothing in it names no keyboard')
 JS
+
+work=$(mktemp -d)
+trap 'rm -rf "$work"' EXIT
+mkdir -p "$work/bin"
+
+cat >"$work/bin/hyprctl" <<'SH'
+#!/bin/bash
+if [[ $* == "-j devices" ]]; then
+  if [[ -f $DEVICES_JSON ]]; then
+    cat "$DEVICES_JSON"
+  else
+    exit 1
+  fi
+elif [[ $1 == "switchxkblayout" ]]; then
+  printf 'switch %s %s\n' "$2" "$3" >>"$CALLS"
+fi
+exit 0
+SH
+chmod +x "$work/bin/hyprctl"
+
+export CALLS="$work/calls" DEVICES_JSON="$work/devices.json"
+export PATH="$work/bin:$PATH"
+
+# A seat with one layout does not cycle
+cat >"$DEVICES_JSON" <<'JSON'
+{
+  "keyboards": [
+    { "name": "at-translated-set-2-keyboard", "layout": "us", "active_layout_index": 0, "main": true }
+  ]
+}
+JSON
+"$ROOT/bin/omarchy-hyprland-keyboard-layout-switch"
+if [[ -f $CALLS ]]; then
+  fail "single layout keyboard does not dispatch switch"
+fi
+pass "single layout keyboard skips switching"
+
+# A seat with multiple layouts advances to next layout and synchronizes matching devices
+cat >"$DEVICES_JSON" <<'JSON'
+{
+  "keyboards": [
+    { "name": "at-translated-set-2-keyboard", "layout": "us,se", "active_layout_index": 0, "main": false },
+    { "name": "usb-keyboard", "layout": "us,se", "active_layout_index": 1, "main": false },
+    { "name": "hl-virtual-keyboard-fcitx5", "layout": "us,se", "active_layout_index": 0, "main": true }
+  ]
+}
+JSON
+"$ROOT/bin/omarchy-hyprland-keyboard-layout-switch"
+grep -q '^switch at-translated-set-2-keyboard 1$' "$CALLS" || fail "primary keyboard advances"
+grep -q '^switch usb-keyboard 1$' "$CALLS" || fail "matching keyboard synchronizes"
+grep -q '^switch hl-virtual-keyboard-fcitx5 1$' "$CALLS" || fail "virtual keyboard synchronizes"
+pass "switch advances primary keyboard and keeps seat devices in lockstep"
+rm -f "$CALLS"
+
+# Explicit device argument advances from that device
+"$ROOT/bin/omarchy-hyprland-keyboard-layout-switch" usb-keyboard
+grep -q '^switch at-translated-set-2-keyboard 0$' "$CALLS" || fail "primary keyboard synchronizes to caller"
+grep -q '^switch usb-keyboard 0$' "$CALLS" || fail "targeted device advances"
+pass "switch respects caller device selection"
+rm -f "$CALLS"
+
+# Unknown or misspelled device argument skips switching other keyboards
+"$ROOT/bin/omarchy-hyprland-keyboard-layout-switch" nonexistent-device
+if [[ -f $CALLS ]]; then
+  fail "unknown device should not dispatch switch commands"
+fi
+pass "unknown device skips switching"
+
+# Fallback when hyprctl query fails
+rm -f "$DEVICES_JSON"
+"$ROOT/bin/omarchy-hyprland-keyboard-layout-switch"
+grep -q '^switch all next$' "$CALLS" || fail "fallback switches all next"
+pass "fallback dispatches switch all next when device query fails"
+
+
